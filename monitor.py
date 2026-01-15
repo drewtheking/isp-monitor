@@ -13,11 +13,9 @@ SMTP_EMAIL = os.environ.get("SMTP_EMAIL")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") 
 SHEET_NAME = "SMTP AUTOMATION FOR STORE ASSIGN" 
 
-def send_email(to_email, branch, isp, details, status_type):
-    subject = f"{status_type} ALERT: {branch} ({isp})"
-    body = f"Network Status Update\n\nBranch: {branch}\nISP: {isp}\nDetails: {details}\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    msg = MIMEText(body)
-    msg['Subject'] = subject
+def send_email(to_email, branch, isp, details):
+    msg = MIMEText(details)
+    msg['Subject'] = f"NETWORK ALERT: {branch} ({isp})"
     msg['From'] = SMTP_EMAIL
     msg['To'] = to_email
     try:
@@ -25,59 +23,55 @@ def send_email(to_email, branch, isp, details, status_type):
             server.login(SMTP_EMAIL, SMTP_PASSWORD)
             server.send_message(msg)
     except Exception as e:
-        print(f"Email failed: {e}")
+        print(f"!!! Email Error: {e}")
 
 def main():
+    print("--- Starting Monitor ---")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(creds_json)
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
-    sheet = client.open(SHEET_NAME).sheet1
     
-    # Read Columns A to E
-    list_of_lists = sheet.get('A1:E100') 
-    headers = list_of_lists[0]
-    data = [dict(zip(headers, row)) for row in list_of_lists[1:]]
+    sheet = client.open(SHEET_NAME).sheet1
+    # Get all values as a list of lists to avoid header name issues
+    all_rows = sheet.get_all_values() 
+    
+    # We skip the first row (headers)
+    for i, row in enumerate(all_rows[1:], start=2):
+        # row[0]=Branch, row[1]=ISP, row[2]=IP, row[3]=Email
+        branch = row[0]
+        isp = row[1]
+        raw_ip_entry = row[2]
+        email_recipient = row[3]
 
-    for i, row in enumerate(data, start=2): 
-        raw_ip_entry = row.get('ip', '')
-        branch = row.get('branch', 'Unknown')
-        isp = row.get('isp', 'Unknown')
-        email_recipient = row.get('email', '')
-
-        if not raw_ip_entry:
+        if not raw_ip_entry or "https" not in raw_ip_entry:
             continue
 
-        # 1. EXTRACT RAW PUBLIC IP ONLY
         try:
-            # Converts "https://124.107.249.219:4444" -> "124.107.249.219"
+            # Clean: https://124.107.249.219:4444 -> 124.107.249.219
             clean_ip = raw_ip_entry.split('//')[1].split(':')[0]
-        except:
-            continue
+            
+            print(f"Pinging {branch} at {clean_ip}...")
+            response_time = ping(clean_ip, timeout=2)
+            timestamp = datetime.now().strftime("%H:%M")
 
-        # 2. PERFORM NORMAL PING (ICMP)
-        # response_time is in seconds
-        response_time = ping(clean_ip, timeout=2)
-        timestamp = datetime.now().strftime("%H:%M")
-
-        if response_time is None:
-            # TOTAL DOWN
-            print(f"{branch} ({clean_ip}): DOWN")
-            sheet.update_cell(i, 5, f"DOWN @ {timestamp}")
-            send_email(email_recipient, branch, isp, f"IP {clean_ip} is not responding to pings.", "OFFLINE")
-        
-        else:
-            latency_ms = response_time * 1000
-            if latency_ms > 100:
-                # HIGH LATENCY
-                print(f"{branch} ({clean_ip}): SLOW ({latency_ms:.0f}ms)")
-                sheet.update_cell(i, 5, f"LATENCY: {latency_ms:.0f}ms @ {timestamp}")
-                send_email(email_recipient, branch, isp, f"Latency is {latency_ms:.2f}ms (Threshold: 100ms)", "SPEED")
+            if response_time is None:
+                print(f" RESULT: DOWN")
+                sheet.update_cell(i, 5, f"DOWN @ {timestamp}") # Column E
+                send_email(email_recipient, branch, isp, f"Unreachable: {clean_ip}")
             else:
-                # HEALTHY
-                print(f"{branch} ({clean_ip}): OK ({latency_ms:.0f}ms)")
-                # Optional: Uncomment below to clear the cell if the connection is now fine
-                # sheet.update_cell(i, 5, "")
+                latency = response_time * 1000
+                if latency > 100:
+                    print(f" RESULT: SLOW ({latency:.0f}ms)")
+                    sheet.update_cell(i, 5, f"SLOW: {latency:.0f}ms @ {timestamp}")
+                    send_email(email_recipient, branch, isp, f"High Latency: {latency:.2f}ms")
+                else:
+                    print(f" RESULT: OK ({latency:.0f}ms)")
+                    # Clear the cell so you know it's currently healthy
+                    sheet.update_cell(i, 5, "OK") 
+
+        except Exception as e:
+            print(f" Error processing row {i}: {e}")
 
 if __name__ == "__main__":
     main()
