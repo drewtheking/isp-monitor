@@ -8,15 +8,14 @@ from datetime import datetime
 import json
 
 # --- CONFIGURATION ---
-# Load credentials from GitHub Secrets (we will set this up later)
 creds_json = os.environ.get("GDRIVE_API_CREDENTIALS")
-SMTP_EMAIL = os.environ.get("SMTP_EMAIL") # Your email
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") # Your App Password
-SHEET_NAME = "SMTP AUTOMATION FOR STORE ASSIGN" # Your specific sheet name
+SMTP_EMAIL = os.environ.get("SMTP_EMAIL") 
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") 
+SHEET_NAME = "SMTP AUTOMATION FOR STORE ASSIGN" 
 
-def send_email(to_email, branch, isp, ip):
-    subject = f"DOWN ALERT: {branch} - {isp}"
-    body = f"Connection Lost!\n\nBranch: {branch}\nISP: {isp}\nIP: {ip}\nTime: {datetime.now()}"
+def send_email(to_email, branch, isp, details, status_type):
+    subject = f"{status_type} ALERT: {branch} ({isp})"
+    body = f"Network Alert Triggered!\n\nBranch: {branch}\nISP: {isp}\nDetails: {details}\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     
     msg = MIMEText(body)
     msg['Subject'] = subject
@@ -24,7 +23,6 @@ def send_email(to_email, branch, isp, ip):
     msg['To'] = to_email
 
     try:
-        # Assuming Gmail/Google Workspace. Change port to 587 if using TLS.
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(SMTP_EMAIL, SMTP_PASSWORD)
             server.send_message(msg)
@@ -33,62 +31,57 @@ def send_email(to_email, branch, isp, ip):
         print(f"Failed to send email: {e}")
 
 def main():
-    # Authenticate with Google Sheets
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_dict = json.loads(creds_json)
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
 
-    # Open the sheet
     sheet = client.open(SHEET_NAME).sheet1
-    data = sheet.get_all_records() # Reads the whole sheet
+    
+    # FIX: Get only Columns A to E to avoid "Duplicate Header" errors
+    list_of_lists = sheet.get('A1:E100') 
+    headers = list_of_lists[0]
+    data = [dict(zip(headers, row)) for row in list_of_lists[1:]]
 
-    # Iterate through rows
-    # Note: gspread uses 1-based indexing. Row 1 is headers.
     for i, row in enumerate(data, start=2): 
-        raw_ip = row['ip'] # format: https://124.107...:4444
-        branch = row['branch']
-        isp = row['isp']
-        email_recipient = row['email']
+        raw_ip = row.get('ip', '')
+        branch = row.get('branch', 'Unknown')
+        isp = row.get('isp', 'Unknown')
+        email_recipient = row.get('email', '')
 
-        # 1. CLEAN THE IP ADDRESS
-        # We need to remove 'https://' and the port ':4444'
-        try:
-            # Splits by '//' to get '124.107...:4444', then splits by ':' to get just the IP
-            clean_ip = raw_ip.split('//')[1].split(':')[0]
-        except:
-            print(f"Skipping invalid IP format: {raw_ip}")
+        if not raw_ip:
             continue
 
-      # 2. PING THE STORE IP
-        # The 'ping' function returns the delay in seconds (e.g., 0.082)
+        # 1. CLEAN THE IP ADDRESS
+        try:
+            clean_ip = raw_ip.split('//')[1].split(':')[0]
+        except:
+            print(f"Skipping invalid IP: {raw_ip}")
+            continue
+
+        # 2. MEASURE LATENCY (In seconds)
         response_time = ping(clean_ip, timeout=2) 
 
-        # 3. LOGIC: CHECK IF DOWN OR SLOW
+        # 3. LOGIC: DOWN OR SLOW (>100ms)
+        timestamp = datetime.now().strftime("%H:%M")
+        
         if response_time is None:
-            status_text = "DOWN (No Response)"
-            print(f"Checking {branch}... {status_text}")
-            send_email(email_recipient, branch, isp, f"IP: {clean_ip} - Status: {status_text}")
-            
-            # Log to Sheet
-            timestamp = datetime.now().strftime("%H:%M")
+            print(f"Checking {branch}... DOWN")
+            send_email(email_recipient, branch, isp, f"No response from {clean_ip}", "DOWN")
             sheet.update_cell(i, 5, f"DOWN @ {timestamp}")
 
         else:
-            # Convert seconds to milliseconds (e.g., 0.082 -> 82ms)
-            latency_ms = response_time * 1000
+            latency_ms = response_time * 1000 # Convert to ms
             
             if latency_ms > 100:
-                status_text = f"SLOW ({latency_ms:.0f}ms)"
-                print(f"Checking {branch}... {status_text}")
-                
-                # Send email because latency > 100ms
-                send_email(email_recipient, branch, isp, f"IP: {clean_ip} - Latency: {latency_ms:.2f}ms (Target: <100ms)")
-                
-                # Update Sheet with the slow speed
-                timestamp = datetime.now().strftime("%H:%M")
+                print(f"Checking {branch}... SLOW ({latency_ms:.0f}ms)")
+                details = f"Latency to Store IP ({clean_ip}) is {latency_ms:.2f}ms. Connections to Apple.com will be degraded."
+                send_email(email_recipient, branch, isp, details, "LATENCY")
                 sheet.update_cell(i, 5, f"SLOW: {latency_ms:.0f}ms @ {timestamp}")
             else:
                 print(f"Checking {branch}... OK ({latency_ms:.0f}ms)")
-                # Optional: Clear the alert cell if it's now healthy
+                # Optional: Clear cell if healthy
                 # sheet.update_cell(i, 5, "")
+
+if __name__ == "__main__":
+    main()
