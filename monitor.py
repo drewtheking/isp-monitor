@@ -3,7 +3,6 @@ import smtplib
 import gspread
 import socket
 from oauth2client.service_account import ServiceAccountCredentials
-from ping3 import ping
 from email.mime.text import MIMEText
 from datetime import datetime
 import json
@@ -14,9 +13,9 @@ SMTP_EMAIL = os.environ.get("SMTP_EMAIL")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD") 
 SHEET_NAME = "SMTP AUTOMATION FOR STORE ASSIGN" 
 
-def send_email(to_email, branch, isp, details, status_type):
-    subject = f"{status_type} ALERT: {branch} ({isp})"
-    body = f"Network Alert!\n\nBranch: {branch}\nISP: {isp}\nDetails: {details}\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+def send_email(to_email, branch, isp, ip_port):
+    subject = f"OFFLINE ALERT: {branch} ({isp})"
+    body = f"Connection unreachable!\n\nBranch: {branch}\nISP: {isp}\nTarget: {ip_port}\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     msg = MIMEText(body)
     msg['Subject'] = subject
     msg['From'] = SMTP_EMAIL
@@ -28,12 +27,13 @@ def send_email(to_email, branch, isp, details, status_type):
     except Exception as e:
         print(f"Email failed: {e}")
 
-def check_port(ip, port):
-    """Checks if a specific TCP port is open."""
+def is_reachable(ip, port):
+    """Checks if a TCP port is reachable (bypass ICMP/Ping blocks)."""
     try:
-        with socket.create_connection((ip, port), timeout=3):
+        # 5 second timeout to be sure
+        with socket.create_connection((ip, port), timeout=5):
             return True
-    except (socket.timeout, ConnectionRefusedError, OSError):
+    except:
         return False
 
 def main():
@@ -43,7 +43,7 @@ def main():
     client = gspread.authorize(creds)
     sheet = client.open(SHEET_NAME).sheet1
     
-    # Read only necessary columns
+    # Get only Columns A to E to avoid duplicate header errors
     list_of_lists = sheet.get('A1:E100') 
     headers = list_of_lists[0]
     data = [dict(zip(headers, row)) for row in list_of_lists[1:]]
@@ -57,32 +57,27 @@ def main():
         if not raw_ip_entry:
             continue
 
-        # Extract IP and Port from https://124.107.249.219:4444
+        # Extract IP and Port from format: https://124.107.249.219:4444
         try:
+            # Cleans the "https://" and splits the IP from the Port
             clean_ip = raw_ip_entry.split('//')[1].split(':')[0]
             port = int(raw_ip_entry.split(':')[-1])
-        except:
-            print(f"Skipping invalid format: {raw_ip_entry}")
+        except Exception as e:
+            print(f"Error parsing IP {raw_ip_entry}: {e}")
             continue
 
-        # 1. TRY TCP PORT CHECK (Most reliable for firewalled stores)
-        is_port_open = check_port(clean_ip, port)
+        # PERFORM REACHABILITY CHECK
+        print(f"Testing {branch} ({clean_ip}:{port})...", end=" ")
         
-        # 2. TRY NORMAL ICMP PING AS BACKUP
-        latency = ping(clean_ip, timeout=2)
-        
-        timestamp = datetime.now().strftime("%H:%M")
-
-        if is_port_open:
-            print(f"{branch}: Port {port} is OPEN (Online)")
-            # If you want to clear the alert in the sheet when it's back up:
-            # sheet.update_cell(i, 5, "ONLINE") 
-        elif latency is not None:
-            print(f"{branch}: Port closed, but Ping OK ({latency*1000:.0f}ms)")
+        if is_reachable(clean_ip, port):
+            print("ONLINE")
+            # Clear the alert cell if it was previously DOWN
+            # sheet.update_cell(i, 5, "") 
         else:
-            print(f"{branch}: UNREACHABLE (Port & Ping failed)")
-            send_email(email_recipient, branch, isp, f"Unreachable at {clean_ip}:{port}", "OFFLINE")
+            print("OFFLINE")
+            timestamp = datetime.now().strftime("%H:%M")
             sheet.update_cell(i, 5, f"DOWN @ {timestamp}")
+            send_email(email_recipient, branch, isp, f"{clean_ip}:{port}")
 
 if __name__ == "__main__":
     main()
