@@ -60,22 +60,35 @@ def main():
             print(f"Skipping invalid IP format: {raw_ip}")
             continue
 
-        # 2. PING THE IP
-        # timeout is in seconds
-        response = ping(clean_ip, timeout=2) 
+      # 2. PING THE STORE IP
+        # The 'ping' function returns the delay in seconds (e.g., 0.082)
+        response_time = ping(clean_ip, timeout=2) 
 
-        status = "UP" if response is not None else "DOWN"
-        print(f"Checking {branch} ({clean_ip})... Status: {status}")
-
-        # 3. LOGIC: IF DOWN, CHECK IF WE NEED TO ALERT
-        if status == "DOWN":
-            # Optional: Check 'lastAlert' column to avoid spamming every 5 mins
-            # For now, we just send the email.
-            send_email(email_recipient, branch, isp, clean_ip)
+        # 3. LOGIC: CHECK IF DOWN OR SLOW
+        if response_time is None:
+            status_text = "DOWN (No Response)"
+            print(f"Checking {branch}... {status_text}")
+            send_email(email_recipient, branch, isp, f"IP: {clean_ip} - Status: {status_text}")
             
-            # Update the 'lastAlert' column (Column E is index 5)
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            sheet.update_cell(i, 5, timestamp) 
+            # Log to Sheet
+            timestamp = datetime.now().strftime("%H:%M")
+            sheet.update_cell(i, 5, f"DOWN @ {timestamp}")
 
-if __name__ == "__main__":
-    main()
+        else:
+            # Convert seconds to milliseconds (e.g., 0.082 -> 82ms)
+            latency_ms = response_time * 1000
+            
+            if latency_ms > 100:
+                status_text = f"SLOW ({latency_ms:.0f}ms)"
+                print(f"Checking {branch}... {status_text}")
+                
+                # Send email because latency > 100ms
+                send_email(email_recipient, branch, isp, f"IP: {clean_ip} - Latency: {latency_ms:.2f}ms (Target: <100ms)")
+                
+                # Update Sheet with the slow speed
+                timestamp = datetime.now().strftime("%H:%M")
+                sheet.update_cell(i, 5, f"SLOW: {latency_ms:.0f}ms @ {timestamp}")
+            else:
+                print(f"Checking {branch}... OK ({latency_ms:.0f}ms)")
+                # Optional: Clear the alert cell if it's now healthy
+                # sheet.update_cell(i, 5, "")
