@@ -30,4 +30,4 @@ jobs:
           SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         # sudo is required for ping to create raw sockets on Linux
-        run: sudo -E python monitor.py
+        run: sudo python -m pip install gspread oauth2client ping3 && sudo -E python monitor.py
