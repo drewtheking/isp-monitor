@@ -6,6 +6,7 @@ from ping3 import ping
 from email.mime.text import MIMEText
 from datetime import datetime
 import json
+import re
 
 # --- CONFIGURATION ---
 creds_json = os.environ.get("GDRIVE_API_CREDENTIALS")
@@ -15,7 +16,7 @@ SHEET_NAME = "SMTP AUTOMATION FOR STORE ASSIGN"
 
 def send_email(to_email, branch, isp, details):
     msg = MIMEText(details)
-    msg['Subject'] = f"NETWORK ALERT: {branch} ({isp})"
+    msg['Subject'] = f"ISP ALERT: {branch} ({isp})"
     msg['From'] = SMTP_EMAIL
     msg['To'] = to_email
     try:
@@ -33,45 +34,45 @@ def main():
     client = gspread.authorize(creds)
     
     sheet = client.open(SHEET_NAME).sheet1
-    # Get all values as a list of lists to avoid header name issues
     all_rows = sheet.get_all_values() 
     
-    # We skip the first row (headers)
+    # We skip headers (Row 1)
     for i, row in enumerate(all_rows[1:], start=2):
-        # row[0]=Branch, row[1]=ISP, row[2]=IP, row[3]=Email
-        branch = row[0]
-        isp = row[1]
-        raw_ip_entry = row[2]
-        email_recipient = row[3]
+        branch = row[0] # Column A
+        isp = row[1]    # Column B
+        raw_url = row[2] # Column C (e.g., https://124.107.249.219:4444)
+        email_to = row[3] # Column D
 
-        if not raw_ip_entry or "https" not in raw_ip_entry:
+        if not raw_url or "." not in raw_url:
             continue
 
         try:
-            # Clean: https://124.107.249.219:4444 -> 124.107.249.219
-            clean_ip = raw_ip_entry.split('//')[1].split(':')[0]
+            # CLEANING: Use regex to extract ONLY the IP address digits
+            # This turns "https://124.107.249.219:4444" into "124.107.249.219"
+            ip_match = re.search(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', raw_url)
+            if not ip_match:
+                print(f"Skipping row {i}: No valid IP found in '{raw_url}'")
+                continue
             
-            print(f"Pinging {branch} at {clean_ip}...")
-            response_time = ping(clean_ip, timeout=2)
-            timestamp = datetime.now().strftime("%H:%M")
+            clean_ip = ip_match.group()
+            print(f"Checking {branch} ({clean_ip})...")
+            
+            # PINGING
+            response = ping(clean_ip, timeout=2)
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-            if response_time is None:
-                print(f" RESULT: DOWN")
+            if response is None:
+                print(f"  > RESULT: DOWN")
                 sheet.update_cell(i, 5, f"DOWN @ {timestamp}") # Column E
-                send_email(email_recipient, branch, isp, f"Unreachable: {clean_ip}")
+                send_email(email_to, branch, isp, f"Unreachable: {clean_ip} (Pings allowed on Firewall but failing)")
             else:
-                latency = response_time * 1000
-                if latency > 100:
-                    print(f" RESULT: SLOW ({latency:.0f}ms)")
-                    sheet.update_cell(i, 5, f"SLOW: {latency:.0f}ms @ {timestamp}")
-                    send_email(email_recipient, branch, isp, f"High Latency: {latency:.2f}ms")
-                else:
-                    print(f" RESULT: OK ({latency:.0f}ms)")
-                    # Clear the cell so you know it's currently healthy
-                    sheet.update_cell(i, 5, "OK") 
+                latency = response * 1000
+                print(f"  > RESULT: {latency:.0f}ms")
+                # Update the sheet so you know it's working
+                sheet.update_cell(i, 5, f"OK: {latency:.0f}ms @ {timestamp}")
 
         except Exception as e:
-            print(f" Error processing row {i}: {e}")
+            print(f"!!! Error on row {i}: {e}")
 
 if __name__ == "__main__":
     main()
